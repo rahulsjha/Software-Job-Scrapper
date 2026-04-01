@@ -71,6 +71,70 @@ async def auto_scroll(page: Page, *, max_rounds: int = 20, idle_ms: int = 800) -
         last_height = new_height
 
 
+def _company_name_to_slug(name: str) -> str:
+    """Convert company name to Wellfound URL slug.
+    Example: "C3 AI" -> "c3-ai", "Heartstamp Inc" -> "heartstamp-inc"
+    """
+    name = name.strip().lower()
+    # Replace spaces and special chars with hyphens
+    name = re.sub(r"[^a-z0-9]+", "-", name)
+    # Remove trailing/leading hyphens
+    name = name.strip("-")
+    return name
+
+
+async def _fetch_company_website_from_wellfound(
+    context: BrowserContext, company_name: str | None, timeout_ms: int = 30000
+) -> str | None:
+    """Fetch company website from Wellfound company profile page.
+    
+    Visit https://wellfound.com/company/{slug} and extract the website link.
+    """
+    if not company_name:
+        return None
+
+    slug = _company_name_to_slug(company_name)
+    company_url = f"https://wellfound.com/company/{slug}"
+
+    page = await context.new_page()
+    try:
+        try:
+            await page.goto(company_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await page.wait_for_timeout(800)
+        except Exception:
+            # Company profile might not exist.
+            return None
+
+        html = await _safe_page_content(page)
+        soup = BeautifulSoup(html, "lxml")
+
+        # Look for website link on company profile.
+        for a in soup.select("a[href]"):
+            href = a.get("href")
+            if not href or not isinstance(href, str):
+                continue
+            label = (a.get_text(" ", strip=True) or "").lower()
+            if "website" in label and href.startswith("http"):
+                return href
+
+        # Fallback: first external HTTP link (not Wellfound).
+        for a in soup.select("a[href]"):
+            href = a.get("href")
+            if not href or not isinstance(href, str):
+                continue
+            if href.startswith("http") and "wellfound.com" not in href:
+                return href
+
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
 def _clean_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -320,6 +384,14 @@ async def scrape_wellfound_job(
         )
 
         lead.company_website = _extract_company_website(soup)
+        
+        # If no website found on job page, try fetching from Wellfound company profile.
+        if not lead.company_website and lead.company:
+            try:
+                lead.company_website = await _fetch_company_website_from_wellfound(context, lead.company, timeout_ms)
+            except Exception:
+                pass
+        
         lead.apply_url = _extract_apply_url(soup)
         lead.contact_url = _extract_contact_url(soup)
         lead.google_form_url = _extract_google_form_url(soup)
