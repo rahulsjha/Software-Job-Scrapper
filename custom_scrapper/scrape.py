@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
 
 from .models import JobLead
+from .company_profile import candidate_company_slugs
 
 
 def _is_captcha_page(html: str) -> bool:
@@ -234,6 +235,179 @@ def _extract_contact_name(text: str) -> str | None:
     return None
 
 
+def _extract_team_members_from_job_posting(soup: BeautifulSoup) -> list[str]:
+    """Extract team member names from the job posting page itself (e.g., 'Your team', 'Meet the team', hiring manager names)."""
+    names: list[str] = []
+    name_re = re.compile(r"^[A-Z][a-zA-Z'\-]+(?:\s+[A-Z][a-zA-Z'\-]+)+$")
+    
+    # Look for common section headers
+    for pattern in [r"your\s+team", r"meet\s+the\s+team", r"team\s+members", r"hiring\s+manager", r"posted\s+by"]:
+        anchor = soup.find(string=re.compile(pattern, re.IGNORECASE))
+        if anchor and getattr(anchor, "parent", None):
+            node = anchor.parent
+            for _ in range(5):  # check a few parent levels
+                if not node or not hasattr(node, "select"):
+                    break
+                for el in node.select("h1,h2,h3,h4,h5,strong,a,span,div"):
+                    t = (el.get_text(" ", strip=True) or "").strip()
+                    t = " ".join(t.split())
+                    if len(t) >= 4 and len(t) <= 60 and name_re.match(t):
+                        names.append(t)
+                node = getattr(node, "parent", None)
+        if names:
+            break
+    
+    # De-dupe and exclude false positives
+    out: list[str] = []
+    seen: set[str] = set()
+    exclude = {"your team", "meet the team", "team members", "hiring manager", "posted by", "wellfound", "apply now"}
+    for n in names:
+        ln = n.lower()
+        if ln in exclude or len(n.split()) > 3:
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out[:10]
+
+
+def _extract_team_members_from_company_profile(soup: BeautifulSoup) -> list[str]:
+    # Best-effort: look for "Meet your team" section.
+    anchor = soup.find(string=re.compile(r"meet\s+your\s+team", re.IGNORECASE))
+    names: list[str] = []
+    name_re = re.compile(r"^[A-Z][a-zA-Z'\-]+(?:\s+[A-Z][a-zA-Z'\-]+)+$")
+
+    def collect(container) -> None:
+        if not container:
+            return
+        for el in container.select("h1,h2,h3,h4,a,span,div"):
+            t = (el.get_text(" ", strip=True) or "").strip()
+            t = " ".join(t.split())
+            if len(t) < 4 or len(t) > 60:
+                continue
+            if name_re.match(t):
+                names.append(t)
+
+    if anchor and getattr(anchor, "parent", None):
+        node = anchor.parent
+        for _ in range(4):
+            if not node or not hasattr(node, "select"):
+                break
+            collect(node)
+            node = getattr(node, "parent", None)
+
+    # De-dupe and cap.
+    out: list[str] = []
+    seen: set[str] = set()
+    exclude = {"wellfound", "team", "meet your team", "apply", "jobs", "open roles"}
+    for n in names:
+        if n.lower() in exclude:
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out[:20]
+
+
+async def fetch_company_profile_from_wellfound(
+    context: BrowserContext,
+    company_name: str | None,
+    *,
+    timeout_ms: int = 30000,
+    allow_manual_captcha: bool = False,
+    manual_captcha_timeout_s: int = 180,
+) -> dict[str, object] | None:
+    """Fetch company profile data from https://wellfound.com/company/<slug> using Playwright.
+
+    This works even when direct HTTP requests are blocked, as long as the user can
+    solve CAPTCHA once in headful mode and the persistent profile keeps cookies.
+    """
+
+    if not company_name:
+        return None
+
+    slugs = candidate_company_slugs(company_name)
+    if not slugs:
+        return None
+
+    page = await context.new_page()
+    try:
+        for slug in slugs:
+            url = f"https://wellfound.com/company/{slug}"
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await page.wait_for_timeout(800)
+            except Exception:
+                continue
+
+            html = await _safe_page_content(page)
+
+            if _is_access_restricted_page(html):
+                raise RuntimeError(
+                    "Wellfound returned 'Access is temporarily restricted'. "
+                    "Company profiles cannot be scraped right now."
+                )
+
+            if _is_captcha_page(html):
+                if not allow_manual_captcha:
+                    continue
+
+                print(
+                    f"[CAPTCHA] Blocked by bot protection for {url}. "
+                    f"Please complete the CAPTCHA in the opened browser window within {manual_captcha_timeout_s}s..."
+                )
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
+
+                for _ in range(max(1, manual_captcha_timeout_s // 2)):
+                    await asyncio.sleep(2)
+                    if page.is_closed():
+                        return None
+                    html = await _safe_page_content(page)
+                    if _is_access_restricted_page(html):
+                        # Not solvable via CAPTCHA; treat as hard block.
+                        raise RuntimeError(
+                            "Wellfound returned 'Access is temporarily restricted' after the challenge. "
+                            "Company profiles cannot be scraped right now."
+                        )
+                    if not _is_captcha_page(html):
+                        break
+                else:
+                    # Timed out.
+                    continue
+
+            soup = BeautifulSoup(html, "lxml")
+
+            website = _extract_company_website(soup)
+            team = _extract_team_members_from_company_profile(soup)
+
+            company_on_page = _extract_first_text(
+                soup,
+                [
+                    "h1",
+                    "[data-testid='company-name']",
+                ],
+            )
+
+            return {
+                "company_profile_url": url,
+                "company": company_on_page,
+                "company_website": website,
+                "team_members": team,
+            }
+
+        return None
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
 def _extract_skills(soup: BeautifulSoup, full_text: str) -> list[str]:
     skills: list[str] = []
 
@@ -303,7 +477,7 @@ async def scrape_wellfound_job(
             if allow_manual_captcha:
                 print(
                     f"[CAPTCHA] Blocked by bot protection for {url}. "
-                    f"Please complete the CAPTCHA in the opened Chromium window within {manual_captcha_timeout_s}s..."
+                    f"Please complete the CAPTCHA in the opened browser window within {manual_captcha_timeout_s}s..."
                 )
                 try:
                     await page.bring_to_front()
@@ -398,6 +572,13 @@ async def scrape_wellfound_job(
         lead.compensation_text = _extract_compensation(full_text)
         lead.contact_name = _extract_contact_name(full_text)
         lead.required_skills = _extract_skills(soup, full_text)
+        
+        # Extract team members from job posting page (e.g., "Your team", "Meet the team" sections)
+        job_page_team = _extract_team_members_from_job_posting(soup)
+        if job_page_team:
+            lead.team_members = job_page_team
+            if not lead.contact_name:
+                lead.contact_name = job_page_team[0]
 
         if debug_dir and not (lead.title or lead.company or lead.description):
             dbg = Path(debug_dir)
@@ -439,6 +620,7 @@ def lead_to_dict(lead: JobLead) -> dict:
     d["required_skills"] = ", ".join(lead.required_skills)
     d["matched_skills"] = ", ".join(lead.matched_skills)
     d["inferred_emails"] = ", ".join(lead.inferred_emails)
+    d["team_members"] = ", ".join(lead.team_members)
     for k in ("description", "draft_email", "error"):
         v = d.get(k)
         if isinstance(v, str) and ("\n" in v or "\r" in v):

@@ -10,7 +10,11 @@ class JobLead:
     title: str | None = None
     company: str | None = None
     description: str | None = None
+
+    company_profile_url: str | None = None
     company_website: str | None = None
+    team_members: list[str] = field(default_factory=list)
+
     contact_name: str | None = None
     apply_url: str | None = None
     contact_url: str | None = None

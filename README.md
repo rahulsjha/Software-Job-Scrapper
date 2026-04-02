@@ -14,7 +14,7 @@ Pipeline:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m playwright install chromium
+python -m playwright install firefox
 ```
 
 Create a `.env` file:
@@ -37,6 +37,25 @@ python -m custom_scrapper \
   --max-urls 20 \
   --min-match 0.35 \
   --out output/jobs.csv
+```
+
+If you see “Access is temporarily restricted”, slow down and stop early:
+
+```bash
+python -m custom_scrapper --wellfound-sleep 3 --wellfound-jitter 2 --stop-on-restricted ...
+```
+
+Use a different Playwright engine if needed:
+
+```bash
+python -m custom_scrapper --browser webkit ...
+```
+
+Optional fallback: If Wellfound blocks your network (no CAPTCHA shown), you can still fill `company_website` + `contact_name` using the company’s own site:
+
+```bash
+python -m custom_scrapper --serp-only --web-enrich --out output/jobs.csv
+```
 ```
 
 Print the generated Google query (no API call):

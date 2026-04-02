@@ -28,6 +28,7 @@ def google_serp_search_detailed(
     page_size: int = 10,
     sleep_s: float = 0.0,
     wellfound_jobs_only: bool = True,
+    single_request: bool = False,
 ) -> list[SerpResult]:
     """Query SerpAPI's Google engine and return organic results.
 
@@ -115,6 +116,9 @@ def google_serp_search_detailed(
         if added_this_page == 0:
             break
 
+        if single_request:
+            break
+
         start += page_size
 
     return results
@@ -127,6 +131,7 @@ def google_serp_search_detailed_filtered(
     page_size: int = 10,
     sleep_s: float = 0.0,
     wellfound_jobs_only: bool = True,
+    single_request: bool = False,
 ) -> list[SerpResult]:
     """Backwards-compatible alias used by enrichment helpers."""
 
@@ -136,6 +141,7 @@ def google_serp_search_detailed_filtered(
         page_size=page_size,
         sleep_s=sleep_s,
         wellfound_jobs_only=wellfound_jobs_only,
+        single_request=single_request,
     )
 
 
@@ -154,6 +160,7 @@ def google_serp_search_detailed_paged(
         page_size=page_size,
         sleep_s=sleep_s,
         wellfound_jobs_only=True,
+        single_request=False,
     )
 
 
@@ -165,5 +172,6 @@ def google_serp_search(query: str, *, max_results: int = 20, sleep_s: float = 0.
             max_results=max_results,
             sleep_s=sleep_s,
             wellfound_jobs_only=True,
+            single_request=False,
         )
     ]

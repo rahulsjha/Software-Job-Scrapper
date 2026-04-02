@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+output/
+playwright/.cache/
+.DS_Store
+playwright_profile*/
